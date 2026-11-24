@@ -1,6 +1,8 @@
-# ReciboApp V1
+# ReciboApp V1.1
 
 ReciboApp es una PWA offline para registrar ventas, cobrar productos y generar tickets digitales. Eslogan: **Pesa, registra y cobra**.
+
+La versión 1.1 agrega precios P1/P2/P3, botones de cantidades rápidas configurables, control de inventario y registro de movimientos. Las ventas descuentan existencias al confirmarse; cancelar una venta repone únicamente lo que se había descontado.
 
 ## Arquitectura
 
@@ -52,7 +54,7 @@ No se incluye un despliegue automático. Un despliegue a producción debe autori
 
 ## Almacenamiento
 
-Se utilizan las siguientes claves independientes y versionadas:
+El estado actual se guarda de forma conjunta en `reciboapp_v11_state`, para que cada operación relacionada (por ejemplo, venta, inventario y movimiento) se escriba como una sola actualización. Al iniciar, ReciboApp migra automáticamente las claves anteriores de V1:
 
 - `reciboapp_v1_products`
 - `reciboapp_v1_sales`
@@ -60,11 +62,11 @@ Se utilizan las siguientes claves independientes y versionadas:
 - `reciboapp_v1_cart`
 - `reciboapp_v1_sequence`
 
-Los cálculos monetarios se realizan en centavos enteros. Los kilogramos admiten tres decimales y las demás unidades usan cantidades enteras.
+Los cálculos monetarios se realizan en centavos enteros. Las cantidades de peso se manejan internamente en gramos enteros y se muestran en la unidad configurada. Los kilogramos admiten tres decimales; las demás unidades usan cantidades enteras.
 
 ## Importación y exportación
 
-Ajustes permite exportar un respaldo JSON y reemplazar los datos mediante un archivo previamente validado. La aplicación pide confirmación antes de importar o restablecer datos.
+Ajustes permite exportar un respaldo JSON y reemplazar los datos mediante un archivo previamente validado, incluidos los movimientos de inventario. La aplicación pide confirmación antes de importar o restablecer datos. Los precios P2/P3 que no estén configurados se cobran con el precio P1.
 
 ## Limitaciones conocidas
 

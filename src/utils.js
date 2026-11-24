@@ -54,10 +54,12 @@ export function formatMXN(cents) {
   }).format(cents / 100)
 }
 
-export function formatQuantity(quantity, unit) {
+export function formatQuantity(quantity, unit, customLabel = unit) {
   const value = Number(quantity)
   if (unit === 'Kilogramo') return `${value.toFixed(3)} kg`
-  return `${value} ${unit}`
+  if (unit === 'Gramo') return `${value} gr`
+  if (unit === 'Tonelada') return `${value} ton`
+  return `${value} ${customLabel || unit}`
 }
 
 export function localDateKey(date = new Date()) {
