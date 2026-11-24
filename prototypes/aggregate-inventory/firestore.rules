@@ -1,0 +1,303 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedInAs(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email_verified == true;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function resetting(uid) {
+      return exists(userPath(uid))
+        && get(userPath(uid)).data.get('resetInProgress', false) == true;
+    }
+
+    function inventoryPath(uid) {
+      return /databases/$(database)/documents/users/$(uid)/inventory/current;
+    }
+
+    function salePath(uid, saleId) {
+      return /databases/$(database)/documents/users/$(uid)/sales/$(saleId);
+    }
+
+    function movementPath(uid, operationId) {
+      return /databases/$(database)/documents/users/$(uid)/inventoryMovements/$(operationId);
+    }
+
+    function counterPath(uid) {
+      return /databases/$(database)/documents/users/$(uid)/counters/sales;
+    }
+
+    function cartPath(uid) {
+      return /databases/$(database)/documents/users/$(uid)/carts/current;
+    }
+
+    function validId(value) {
+      return value is string && value.matches('^[A-Za-z0-9_-]{1,160}$');
+    }
+
+    function validInventoryShape(data) {
+      return data.keys().hasOnly(['stocks', 'revision', 'lastOperationId'])
+        && data.stocks is map
+        && data.stocks.size() <= 1000
+        && data.revision is int && data.revision >= 0
+        && data.lastOperationId is string;
+    }
+
+    function validSaleShape(data) {
+      return data.keys().hasAll([
+          'id', 'sequence', 'folio', 'createdAt', 'customerName',
+          'paymentMethod', 'receivedCents', 'changeCents', 'totalCents',
+          'status', 'items', 'inventoryItems', 'inventoryCount',
+          'productIds', 'inventoryApplied'
+        ])
+        && data.keys().hasOnly([
+          'id', 'sequence', 'folio', 'createdAt', 'customerName',
+          'paymentMethod', 'receivedCents', 'changeCents', 'totalCents',
+          'status', 'items', 'inventoryItems', 'inventoryCount',
+          'productIds', 'inventoryApplied', 'cancelledAt',
+          'cancellationOperationId'
+        ])
+        && validId(data.id)
+        && data.sequence is int && data.sequence >= 1
+        && data.folio is string
+        && data.createdAt is string
+        && data.customerName is string && data.customerName.size() <= 200
+        && data.paymentMethod in ['efectivo', 'transferencia', 'otro']
+        && data.receivedCents is int && data.receivedCents >= 0
+        && data.changeCents is int && data.changeCents >= 0
+        && data.totalCents is int && data.totalCents >= 0
+        && data.status in ['completed', 'cancelled']
+        && data.items is list && data.items.size() > 0 && data.items.size() <= 200
+        && data.inventoryItems is map
+        && data.inventoryCount is int && data.inventoryCount >= 0 && data.inventoryCount <= 4
+        && data.productIds is list && data.productIds.size() == 50
+        && data.inventoryItems.size() == data.inventoryCount
+        && data.inventoryApplied == (data.inventoryCount > 0)
+        && (!data.keys().hasAny(['cancelledAt']) || data.cancelledAt is string)
+        && (!data.keys().hasAny(['cancellationOperationId']) || validId(data.cancellationOperationId));
+    }
+
+    function validMovementShape(data, operationId) {
+      return data.keys().hasOnly([
+          'id', 'type', 'saleId', 'entries', 'inventoryCount', 'productIds', 'createdAt'
+        ])
+        && data.id == operationId
+        && validId(data.id)
+        && data.type in ['sale', 'sale-cancel']
+        && validId(data.saleId)
+        && data.entries is map
+        && data.inventoryCount is int && data.inventoryCount >= 0 && data.inventoryCount <= 4
+        && data.productIds is list && data.productIds.size() == 50
+        && data.entries.size() == data.inventoryCount
+        && data.createdAt is string;
+    }
+
+    function validEntry(sale, movement, beforeStocks, afterStocks, index, kind) {
+      let productId = movement.productIds[index];
+      let entry = movement.entries.get(productId, null);
+      let quantity = sale.inventoryItems.get(productId, 0);
+      return index >= movement.inventoryCount
+        || (productId != ''
+          && entry is map
+          && entry.keys().hasOnly(['quantityBase', 'stockBeforeBase', 'stockAfterBase'])
+          && entry.quantityBase is int && entry.quantityBase > 0
+          && entry.quantityBase == quantity
+          && entry.stockBeforeBase >= 0
+          && entry.stockAfterBase >= 0
+          && entry.stockBeforeBase == beforeStocks.get(productId, -1)
+          && entry.stockAfterBase == afterStocks.get(productId, -1)
+          && (kind == 'sale'
+            ? entry.stockAfterBase == entry.stockBeforeBase - entry.quantityBase
+            : entry.stockAfterBase == entry.stockBeforeBase + entry.quantityBase));
+    }
+
+    function entriesMatch(sale, movement, beforeStocks, afterStocks, kind) {
+      return movement.inventoryCount == sale.inventoryCount
+        && movement.productIds == sale.productIds
+        && movement.entries.keys().hasOnly(sale.productIds)
+        && sale.inventoryItems.keys().hasOnly(sale.productIds)
+        && validEntry(sale, movement, beforeStocks, afterStocks, 0, kind)
+        && validEntry(sale, movement, beforeStocks, afterStocks, 1, kind)
+        && validEntry(sale, movement, beforeStocks, afterStocks, 2, kind)
+        && validEntry(sale, movement, beforeStocks, afterStocks, 3, kind);
+    }
+
+    function inventoryKeysMatch(beforeStocks, afterStocks, movement) {
+      let changed = beforeStocks.diff(afterStocks).affectedKeys();
+      return changed.size() == movement.inventoryCount
+        && changed.hasOnly(movement.productIds);
+    }
+
+    function validSaleInventoryUpdate(uid, operationId, beforeData, afterData, movement) {
+      let sale = getAfter(salePath(uid, operationId)).data;
+      return movement.type == 'sale'
+        && movement.saleId == operationId
+        && !exists(salePath(uid, operationId))
+        && sale.status == 'completed'
+        && sale.id == operationId
+        && sale.inventoryCount == movement.inventoryCount
+        && inventoryKeysMatch(beforeData.stocks, afterData.stocks, movement)
+        && entriesMatch(sale, movement, beforeData.stocks, afterData.stocks, 'sale');
+    }
+
+    function validCancellationInventoryUpdate(uid, operationId, beforeData, afterData, movement) {
+      let beforeSale = get(salePath(uid, movement.saleId)).data;
+      let afterSale = getAfter(salePath(uid, movement.saleId)).data;
+      return movement.type == 'sale-cancel'
+        && beforeSale.status == 'completed'
+        && afterSale.status == 'cancelled'
+        && afterSale.cancellationOperationId == operationId
+        && afterSale.id == movement.saleId
+        && inventoryKeysMatch(beforeData.stocks, afterData.stocks, movement)
+        && entriesMatch(beforeSale, movement, beforeData.stocks, afterData.stocks, 'sale-cancel');
+    }
+
+    function validInventoryUpdate(uid, operationId, beforeData, afterData) {
+      return validInventoryShape(afterData)
+        && afterData.diff(beforeData).affectedKeys().hasOnly(['stocks', 'revision', 'lastOperationId'])
+        && afterData.revision == beforeData.revision + 1
+        && afterData.lastOperationId == operationId
+        && existsAfter(movementPath(uid, operationId))
+        && validMovementShape(getAfter(movementPath(uid, operationId)).data, operationId)
+        && (getAfter(movementPath(uid, operationId)).data.type == 'sale'
+          ? validSaleInventoryUpdate(uid, operationId, beforeData, afterData, getAfter(movementPath(uid, operationId)).data)
+          : validCancellationInventoryUpdate(uid, operationId, beforeData, afterData, getAfter(movementPath(uid, operationId)).data));
+    }
+
+    match /users/{uid} {
+      allow read: if signedInAs(uid);
+      allow create: if signedInAs(uid)
+        && request.resource.data.keys().hasOnly(['createdAt', 'resetInProgress'])
+        && (!request.resource.data.keys().hasAny(['resetInProgress']) || request.resource.data.resetInProgress == false);
+      allow update: if signedInAs(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resetInProgress'])
+        && request.resource.data.resetInProgress == true;
+      allow delete: if false;
+
+      match /products/{productId} {
+        allow read: if signedInAs(uid);
+        allow create, update: if signedInAs(uid) && !resetting(uid)
+          && request.resource.data.keys().hasOnly([
+            'id', 'name', 'unit', 'unitLabel', 'defaultPriceCents', 'priceLevels',
+            'inventoryEnabled', 'inventoryUnit', 'minimumStockGrams', 'quickButtons',
+            'quickButtonsCustom', 'createdAt', 'modifiedAt'
+          ])
+          && request.resource.data.id == productId
+          && request.resource.data.name is string
+          && request.resource.data.defaultPriceCents is int
+          && request.resource.data.minimumStockGrams is int
+          && request.resource.data.inventoryEnabled is bool
+          && (resource == null
+            || request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'name', 'unit', 'unitLabel', 'defaultPriceCents', 'priceLevels',
+              'inventoryUnit', 'minimumStockGrams', 'quickButtons',
+              'quickButtonsCustom', 'modifiedAt'
+            ]));
+        allow delete: if signedInAs(uid) && resetting(uid);
+      }
+
+      match /inventory/{inventoryId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && !resetting(uid)
+          && inventoryId == 'current'
+          && validInventoryShape(request.resource.data)
+          && request.resource.data.stocks.size() == 0
+          && request.resource.data.revision == 0
+          && request.resource.data.lastOperationId == '';
+        allow update: if signedInAs(uid) && !resetting(uid)
+          && inventoryId == 'current'
+          && validInventoryUpdate(uid, request.resource.data.lastOperationId, resource.data, request.resource.data);
+        allow delete: if signedInAs(uid) && resetting(uid);
+      }
+
+      match /sales/{saleId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && !resetting(uid)
+          && validSaleShape(request.resource.data)
+          && request.resource.data.id == saleId
+          && request.resource.data.status == 'completed'
+          && request.resource.data.inventoryCount <= 4
+          && existsAfter(inventoryPath(uid))
+          && getAfter(inventoryPath(uid)).data.lastOperationId == saleId
+          && existsAfter(movementPath(uid, saleId))
+          && getAfter(movementPath(uid, saleId)).data.type == 'sale'
+          && getAfter(movementPath(uid, saleId)).data.saleId == saleId
+          && existsAfter(counterPath(uid))
+          && getAfter(counterPath(uid)).data.value == request.resource.data.sequence
+          && getAfter(counterPath(uid)).data.lastOperationId == saleId
+          && existsAfter(cartPath(uid))
+          && getAfter(cartPath(uid)).data.items.size() == 0;
+        allow update: if signedInAs(uid) && !resetting(uid)
+          && resource.data.status == 'completed'
+          && request.resource.data.status == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'cancelledAt', 'cancellationOperationId'
+          ])
+          && request.resource.data.cancelledAt is string
+          && validId(request.resource.data.cancellationOperationId)
+          && existsAfter(inventoryPath(uid))
+          && getAfter(inventoryPath(uid)).data.lastOperationId == request.resource.data.cancellationOperationId
+          && existsAfter(movementPath(uid, request.resource.data.cancellationOperationId))
+          && getAfter(movementPath(uid, request.resource.data.cancellationOperationId)).data.type == 'sale-cancel'
+          && getAfter(movementPath(uid, request.resource.data.cancellationOperationId)).data.saleId == saleId;
+        allow delete: if signedInAs(uid) && resetting(uid);
+      }
+
+      match /inventoryMovements/{operationId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && !resetting(uid)
+          && validMovementShape(request.resource.data, operationId)
+          && (request.resource.data.type == 'sale'
+            ? request.resource.data.saleId == operationId
+              && existsAfter(salePath(uid, operationId))
+              && getAfter(salePath(uid, operationId)).data.status == 'completed'
+            : exists(salePath(uid, request.resource.data.saleId))
+              && get(salePath(uid, request.resource.data.saleId)).data.status == 'completed'
+              && getAfter(salePath(uid, request.resource.data.saleId)).data.status == 'cancelled'
+              && getAfter(salePath(uid, request.resource.data.saleId)).data.cancellationOperationId == operationId);
+        allow update: if false;
+        allow delete: if signedInAs(uid) && resetting(uid);
+      }
+
+      match /counters/{counterId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && !resetting(uid)
+          && counterId == 'sales'
+          && request.resource.data.keys().hasOnly(['value', 'lastOperationId'])
+          && request.resource.data.value == 1
+          && getAfter(salePath(uid, request.resource.data.lastOperationId)).data.sequence == 1;
+        allow update: if signedInAs(uid) && !resetting(uid)
+          && counterId == 'sales'
+          && request.resource.data.keys().hasOnly(['value', 'lastOperationId'])
+          && request.resource.data.value == resource.data.value + 1
+          && getAfter(salePath(uid, request.resource.data.lastOperationId)).data.sequence == request.resource.data.value;
+        allow delete: if signedInAs(uid) && resetting(uid);
+      }
+
+      match /carts/{cartId} {
+        allow read: if signedInAs(uid);
+        allow create, update: if signedInAs(uid) && !resetting(uid)
+          && cartId == 'current'
+          && request.resource.data.keys().hasOnly(['items', 'priceLevel', 'modifiedAt'])
+          && request.resource.data.items is list
+          && request.resource.data.items.size() <= 200
+          && request.resource.data.priceLevel in ['P1', 'P2', 'P3'];
+        allow delete: if signedInAs(uid) && resetting(uid);
+      }
+
+      match /settings/{settingsId} {
+        allow read: if signedInAs(uid);
+        allow write: if false;
+      }
+
+      match /{document=**} {
+        allow read, write: if false;
+      }
+    }
+  }
+}

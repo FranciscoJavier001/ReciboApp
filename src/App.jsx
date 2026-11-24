@@ -1,17 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
-import { STORAGE_KEYS, DEFAULT_SETTINGS, loadAppData, persistAppData, normalizeAppData, validateBackup } from './storage'
+import { loadAppData, normalizeAppData, validateBackup } from './storage'
 import { uid, normalizeSearch, pesoInputToCents, calculateCartTotal, formatMXN, formatQuantity, localDateKey } from './utils'
+import { useAuth } from './AuthProvider'
+import AuthScreen from './AuthScreen'
+import {
+  cancelSale as cancelCloudSale,
+  canQueueOffline,
+  confirmSale as confirmCloudSale,
+  deleteProduct as deleteCloudProduct,
+  loadOlderSales,
+  migrateLegacyData,
+  recordInventoryMovement,
+  resetAccount,
+  saveCartDraft,
+  saveProduct as saveCloudProduct,
+  subscribeAccountData,
+  updateBusinessSettings,
+} from './cloud'
+import { clearPendingSales, getPendingSales, queueSale, syncPendingSales } from './offlineSales'
 import {
   applyInventoryMovement,
-  applySaleInventory,
   calculateUnitSubtotalCents,
   defaultQuickButtons,
   formatBaseQuantity,
   isWeightUnit,
   quickButtonToBase,
   quantityToBase,
-  restoreSaleInventory,
   validateQuickButtons,
   validateUnitQuantity,
 } from './inventory'
@@ -173,7 +188,8 @@ function TicketCanvas({ sale, settings }) {
   return <canvas ref={canvasRef} className="ticket-canvas" aria-label="Vista previa del ticket" />
 }
 
-export default function App() {
+function BusinessApp() {
+  const { user, signOut } = useAuth()
   const [initialState] = useState(loadAppData)
   const [products, setProducts] = useState(initialState.products)
   const [sales, setSales] = useState(initialState.sales)
@@ -202,6 +218,21 @@ export default function App() {
   const [settingsDraft, setSettingsDraft] = useState(settings)
   const confirmingRef = useRef(false)
   const [movementDraft, setMovementDraft] = useState({ productId: '', type: 'stock-in', quantity: '', reason: '' })
+  const [cloudReady, setCloudReady] = useState(false)
+  const [cloudError, setCloudError] = useState('')
+  const [cloudStatus, setCloudStatus] = useState({ fromCache: true, hasPendingWrites: false })
+  const [migration, setMigration] = useState(null)
+  const [migrationDialog, setMigrationDialog] = useState(false)
+  const [migrationProgress, setMigrationProgress] = useState('')
+  const [pendingSales, setPendingSales] = useState([])
+  const [online, setOnline] = useState(navigator.onLine)
+  const [salesHasMore, setSalesHasMore] = useState(false)
+  const salesCursorRef = useRef(null)
+  const salesHasPagedRef = useRef(false)
+  const salesFlushRef = useRef(null)
+  const accountResetRef = useRef(false)
+  const settingsSnapshotRef = useRef(null)
+  const cartSnapshotRef = useRef(null)
 
   const cartTotal = useMemo(() => calculateCartTotal(cart.items), [cart.items])
   const receivedCents = pesoInputToCents(received)
@@ -212,14 +243,98 @@ export default function App() {
   }, [settings.theme])
 
   useEffect(() => {
-    if (initialState.storageError) showToast('No se pudo guardar la migración de datos. Conservamos los datos anteriores.')
-  }, [initialState.storageError])
+    let active = true
+    const unsubscribe = subscribeAccountData(user.uid, (data) => {
+      if (!active) return
+      setProducts(data.products)
+      setSales((current) => {
+        if (!salesHasPagedRef.current) return data.sales
+        const latestIds = new Set(data.sales.map((sale) => sale.id))
+        return [...data.sales, ...current.filter((sale) => !latestIds.has(sale.id))]
+      })
+      if (!salesHasPagedRef.current) {
+        salesCursorRef.current = data.salesCursor
+        setSalesHasMore(data.salesHasMore)
+      }
+      const settingsSnapshot = JSON.stringify(data.settings)
+      if (settingsSnapshotRef.current !== settingsSnapshot) {
+        settingsSnapshotRef.current = settingsSnapshot
+        setSettings(data.settings)
+        setSettingsDraft(data.settings)
+      }
+      const cartSnapshot = JSON.stringify(data.cart)
+      if (cartSnapshotRef.current !== cartSnapshot) {
+        cartSnapshotRef.current = cartSnapshot
+        setCart(data.cart)
+      }
+      setSequence(data.sequence)
+      setInventoryMovements(data.inventoryMovements)
+      setMigration(data.migration)
+      setCloudStatus({ fromCache: data.fromCache, hasPendingWrites: data.hasPendingWrites })
+      setCloudReady(data.ready)
+      setCloudError('')
+      if (data.ready && !data.migration && data.products.length === 0 && data.sales.length === 0) {
+        const hasLocalData = initialState.products.length > 0 || initialState.sales.length > 0
+          || initialState.inventoryMovements.length > 0 || initialState.cart.items.length > 0
+          || initialState.sequence > 0 || initialState.storageError
+        const skipped = localStorage.getItem(`reciboapp_v12_migration_skipped_${user.uid}`)
+        if (hasLocalData && !skipped) setMigrationDialog(true)
+      }
+    }, (error) => {
+      if (!active) return
+      setCloudError(error.message || 'No se pudieron cargar los datos de tu cuenta.')
+      setCloudReady(false)
+    })
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [user.uid, initialState])
 
   useEffect(() => {
-    if (!persistAppData({ products, sales, settings, cart, sequence, inventoryMovements })) {
-      showToast('No se pudieron guardar los cambios. Revisa el espacio disponible en el dispositivo.')
+    if (!cloudReady) return
+    saveCartDraft(user.uid, cart).catch((error) => {
+      setCloudError(error.message || 'No se pudo guardar la cuenta.')
+    })
+  }, [cart, cloudReady, user.uid])
+
+  useEffect(() => {
+    let active = true
+    const refreshQueue = () => getPendingSales(user.uid)
+      .then((entries) => { if (active) setPendingSales(entries) })
+      .catch((error) => { if (active) setCloudError(error.message || 'No se pudo leer la cola offline.') })
+    const updateOnline = () => setOnline(navigator.onLine)
+    window.addEventListener('online', updateOnline)
+    window.addEventListener('offline', updateOnline)
+    refreshQueue()
+    return () => {
+      active = false
+      window.removeEventListener('online', updateOnline)
+      window.removeEventListener('offline', updateOnline)
     }
-  }, [products, sales, settings, cart, sequence, inventoryMovements])
+  }, [user.uid])
+
+  const flushPendingSales = useCallback(() => {
+    if (!online || accountResetRef.current) return Promise.resolve()
+    if (salesFlushRef.current) return salesFlushRef.current
+    const operation = (async () => {
+      const queued = await getPendingSales(user.uid)
+      setPendingSales(queued)
+      setPendingSales(await syncPendingSales(user.uid, queued, confirmCloudSale, canQueueOffline))
+    })()
+    salesFlushRef.current = operation.finally(() => {
+      salesFlushRef.current = null
+    })
+    return salesFlushRef.current
+  }, [online, user.uid])
+
+  useEffect(() => {
+    if (!online || !cloudReady) return undefined
+    const timer = window.setTimeout(() => {
+      flushPendingSales().catch((error) => setCloudError(error.message || 'No se pudieron sincronizar las ventas pendientes.'))
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [online, cloudReady, flushPendingSales])
 
   function showToast(message) {
     setToast(message)
@@ -231,6 +346,47 @@ export default function App() {
     const query = normalizeSearch(productQuery)
     return products.filter((product) => normalizeSearch(product.name).includes(query))
   }, [products, productQuery])
+
+  async function migrateLocalData() {
+    setMigrationProgress('Preparando migración…')
+    try {
+      await migrateLegacyData(user.uid, initialState, (current, total) => {
+        setMigrationProgress(`Migrando bloque ${current} de ${total}…`)
+      })
+      setMigrationProgress('')
+      setMigrationDialog(false)
+      showToast('Datos locales migrados a tu cuenta.')
+    } catch (error) {
+      setMigrationProgress('')
+      showToast(error.message || 'No se pudo completar la migración. Los datos locales siguen intactos.')
+    }
+  }
+
+  function skipLocalMigration() {
+    try {
+      localStorage.setItem(`reciboapp_v12_migration_skipped_${user.uid}`, '1')
+    } catch (error) {
+      showToast(error.message || 'No se pudo guardar esta preferencia.')
+      return
+    }
+    setMigrationDialog(false)
+  }
+
+  async function loadMoreSales() {
+    if (!salesCursorRef.current || !salesHasMore) return
+    try {
+      const page = await loadOlderSales(user.uid, salesCursorRef.current)
+      salesCursorRef.current = page.cursor
+      salesHasPagedRef.current = true
+      setSalesHasMore(page.hasMore)
+      setSales((current) => {
+        const ids = new Set(current.map((sale) => sale.id))
+        return [...current, ...page.sales.filter((sale) => !ids.has(sale.id))]
+      })
+    } catch (error) {
+      showToast(error.message || 'No se pudo cargar el historial anterior.')
+    }
+  }
 
   function selectProduct(product) {
     setSelectedProduct(product)
@@ -334,7 +490,7 @@ export default function App() {
     }
   }
 
-  function saveInventoryMovement(event) {
+  async function saveInventoryMovement(event) {
     event.preventDefault()
     const product = products.find((entry) => entry.id === movementDraft.productId)
     if (!product?.inventoryEnabled) return showToast('Selecciona un producto con inventario activo.')
@@ -348,66 +504,71 @@ export default function App() {
     const delta = negative ? -quantityBase : quantityBase
     const result = applyInventoryMovement(products, inventoryMovements, product.id, movementDraft.type, delta, movementDraft.reason)
     if (result.error) return showToast(result.error)
-    if (!persistAppData({ products: result.products, sales, settings, cart, sequence, inventoryMovements: result.movements })) {
-      return showToast('No se pudo guardar el movimiento de inventario.')
+    try {
+      await recordInventoryMovement(user.uid, {
+        productId: product.id,
+        type: movementDraft.type,
+        quantityBase,
+        negative,
+        reason: movementDraft.reason.trim(),
+      })
+      setMovementDraft({ productId: '', type: 'stock-in', quantity: '', reason: '' })
+      showToast('Movimiento de inventario registrado.')
+    } catch (error) {
+      showToast(error.message || 'No se pudo guardar el movimiento de inventario.')
     }
-    setProducts(result.products)
-    setInventoryMovements(result.movements)
-    setMovementDraft({ productId: '', type: 'stock-in', quantity: '', reason: '' })
-    showToast('Movimiento de inventario registrado.')
   }
 
-  function confirmSale() {
+  async function confirmSale() {
     if (confirmingRef.current || cart.items.length === 0) return
     if (paymentMethod === 'efectivo' && (Number.isNaN(receivedCents) || receivedCents < cartTotal)) {
       return showToast('El efectivo recibido es insuficiente.')
     }
     confirmingRef.current = true
-    const nextSequence = sequence + 1
-    const sale = {
-      id: uid('sale'),
-      folio: String(nextSequence).padStart(6, '0'),
-      createdAt: new Date().toISOString(),
-      customerName: customerName.trim(),
-      paymentMethod,
-      receivedCents: paymentMethod === 'efectivo' ? receivedCents : 0,
-      changeCents: paymentMethod === 'efectivo' ? receivedCents - cartTotal : 0,
-      totalCents: cartTotal,
-      status: 'completed',
-      items: cart.items.map((item) => ({ ...item, subtotalCents: calculateUnitSubtotalCents(item.quantityBase, item.unit, item.priceCents) })),
-    }
-    const inventoryResult = applySaleInventory(products, inventoryMovements, sale)
-    if (inventoryResult.error) {
-      confirmingRef.current = false
-      return showToast(inventoryResult.error)
-    }
-    sale.inventoryItems = inventoryResult.inventoryItems
-    sale.inventoryApplied = inventoryResult.inventoryItems.length > 0
-    const nextSales = [sale, ...sales]
     const emptyCart = { items: [], priceLevel: cart.priceLevel || 'P1' }
-    const nextState = {
-      products: inventoryResult.products,
-      sales: nextSales,
-      settings,
-      cart: emptyCart,
-      sequence: nextSequence,
-      inventoryMovements: inventoryResult.movements,
+    const operationId = uid('sale')
+    const payload = {
+      operationId,
+      items: cart.items.map((item) => ({
+        id: item.id,
+        productId: item.productId,
+        quantityBase: item.quantityBase,
+        priceCents: item.priceCents,
+        priceLevel: item.priceLevel || cart.priceLevel || 'P1',
+      })),
+      paymentMethod,
+      customerName: customerName.trim(),
+      receivedCents: paymentMethod === 'efectivo' ? receivedCents : 0,
+      priceLevel: cart.priceLevel || 'P1',
     }
-    if (!persistAppData(nextState)) {
+    try {
+      const sale = await confirmCloudSale(user.uid, payload)
+      setCart(emptyCart)
+      setCheckout(false)
+      setCustomerName('')
+      setReceived('')
+      setPaymentMethod('efectivo')
+      setTicketSale(sale)
+    } catch (error) {
+      if (canQueueOffline(error)) {
+        try {
+          await queueSale(user.uid, { operationId, payload })
+          setPendingSales(await getPendingSales(user.uid))
+          setCart(emptyCart)
+          setCheckout(false)
+          setCustomerName('')
+          setReceived('')
+          setPaymentMethod('efectivo')
+          showToast('Venta guardada en este dispositivo; se sincronizará al recuperar la conexión.')
+        } catch (queueError) {
+          showToast(queueError.message || 'No se pudo guardar la venta offline. La cuenta sigue intacta.')
+        }
+      } else {
+        showToast(error.message || 'No se pudo completar la venta. La cuenta sigue intacta.')
+      }
+    } finally {
       confirmingRef.current = false
-      return showToast('No se pudo completar la venta. No se borró la cuenta.')
     }
-    setProducts(inventoryResult.products)
-    setInventoryMovements(inventoryResult.movements)
-    setSales(nextSales)
-    setSequence(nextSequence)
-    setCart(emptyCart)
-    setCheckout(false)
-    setCustomerName('')
-    setReceived('')
-    setPaymentMethod('efectivo')
-    setTicketSale(sale)
-    confirmingRef.current = false
   }
 
   function openCheckout() {
@@ -416,7 +577,7 @@ export default function App() {
     setCheckout(true)
   }
 
-  function saveProduct(event) {
+  async function saveProduct(event) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
     const name = String(form.get('name') || '').trim()
@@ -485,28 +646,35 @@ export default function App() {
         modifiedAt: now,
       }]
     }
-    setProducts(next)
-    setProductModal(null)
-  }
-
-  function deleteProduct(product) {
-    if (!window.confirm(`¿Eliminar "${product.name}" del catálogo?`)) return
-    const next = products.filter((entry) => entry.id !== product.id)
-    setProducts(next)
-  }
-
-  function cancelSale(sale) {
-    if (!window.confirm(`¿Cancelar la venta ${sale.folio}? Se conservará en el historial.`)) return
-    const next = sales.map((entry) => entry.id === sale.id ? { ...entry, status: 'cancelled', cancelledAt: new Date().toISOString() } : entry)
-    const restored = restoreSaleInventory(products, inventoryMovements, sale)
-    if (restored.error) return showToast(restored.error)
-    if (!persistAppData({ products: restored.products, sales: next, settings, cart, sequence, inventoryMovements: restored.movements })) {
-      return showToast('No se pudo cancelar la venta. No se modificó el historial ni el inventario.')
+    const product = productModal?.id ? next.find((entry) => entry.id === productModal.id) : next.at(-1)
+    try {
+      await saveCloudProduct(user.uid, product)
+      setProductModal(null)
+      showToast(productModal?.id ? 'Producto actualizado.' : 'Producto creado.')
+    } catch (error) {
+      showToast(error.message || 'No se pudo guardar el producto.')
     }
-    setProducts(restored.products)
-    setInventoryMovements(restored.movements)
-    setSales(next)
-    setSelectedSale(next.find((entry) => entry.id === sale.id) || null)
+  }
+
+  async function deleteProduct(product) {
+    if (!window.confirm(`¿Eliminar "${product.name}" del catálogo?`)) return
+    try {
+      await deleteCloudProduct(user.uid, product.id)
+      showToast('Producto eliminado.')
+    } catch (error) {
+      showToast(error.message || 'No se pudo eliminar el producto.')
+    }
+  }
+
+  async function cancelSale(sale) {
+    if (!window.confirm(`¿Cancelar la venta ${sale.folio}? Se conservará en el historial.`)) return
+    try {
+      await cancelCloudSale(user.uid, sale.id)
+      setSelectedSale({ ...sale, status: 'cancelled', cancelledAt: new Date().toISOString() })
+      showToast('Venta cancelada.')
+    } catch (error) {
+      showToast(error.message || 'No se pudo cancelar la venta.')
+    }
   }
 
   function ticketText(sale) {
@@ -588,64 +756,69 @@ export default function App() {
     URL.revokeObjectURL(url)
   }
 
-  function importBackup(event) {
+  async function importBackup(event) {
     const file = event.target.files?.[0]
     if (!file) return
     const reader = new FileReader()
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const value = JSON.parse(String(reader.result))
         const error = validateBackup(value)
         if (error) return showToast(error)
-        if (!window.confirm('¿Reemplazar todos los datos actuales por este respaldo?')) return
+        if (!window.confirm('La importación solo se permite en una cuenta nueva y vacía; no reemplaza datos existentes. ¿Continuar?')) return
         const imported = normalizeAppData(value)
-        if (!persistAppData(imported)) return showToast('No se pudo importar el respaldo.')
-        setProducts(imported.products)
-        setSales(imported.sales)
-        setSettings(imported.settings)
-        setSettingsDraft(imported.settings)
-        setCart(imported.cart)
-        setSequence(imported.sequence)
-        setInventoryMovements(imported.inventoryMovements)
-        showToast('Respaldo importado.')
-      } catch {
-        showToast('El archivo no contiene JSON válido.')
+        setMigrationProgress('Preparando importación…')
+        await migrateLegacyData(user.uid, imported, (current, total) => {
+          setMigrationProgress(`Importando bloque ${current} de ${total}…`)
+        })
+        setMigrationProgress('')
+        setMigrationDialog(false)
+        showToast('Respaldo importado a la cuenta.')
+      } catch (error) {
+        setMigrationProgress('')
+        showToast(error.message || 'No se pudo importar el respaldo. La cuenta debe estar vacía y no tener una migración previa.')
       }
     }
     reader.readAsText(file)
     event.target.value = ''
   }
 
-  function resetApp() {
+  async function resetApp() {
     if (!window.confirm('Esta acción borrará productos, ventas, ajustes y la cuenta actual. ¿Continuar?')) return
     if (!window.confirm('Confirmación final: ¿restablecer completamente ReciboApp?')) return
-    Object.values(STORAGE_KEYS).forEach((key) => localStorage.removeItem(key))
-    setProducts([])
-    setSales([])
-    setSettings({ ...DEFAULT_SETTINGS })
-    setSettingsDraft({ ...DEFAULT_SETTINGS })
-    setCart({ items: [] })
-    setSequence(0)
-    setInventoryMovements([])
-    setTab('sale')
-    showToast('Aplicación restablecida.')
+    accountResetRef.current = true
+    try {
+      if (salesFlushRef.current) await salesFlushRef.current
+      await resetAccount(user.uid)
+      setTab('sale')
+      try {
+        await clearPendingSales(user.uid)
+        localStorage.removeItem(`reciboapp_v12_migration_skipped_${user.uid}`)
+        setPendingSales([])
+      } catch (error) {
+        showToast(`Cuenta restablecida, pero no se pudo limpiar el almacenamiento local: ${error.message}`)
+        return
+      }
+      showToast('Cuenta restablecida.')
+    } catch (error) {
+      showToast(error.message || 'No se pudo restablecer la cuenta.')
+    } finally {
+      accountResetRef.current = false
+    }
   }
 
-  function saveSettings(event) {
+  async function saveSettings(event) {
     event.preventDefault()
     const weightError = validateQuickButtons(settingsDraft.quickButtons.weight, 'Kilogramo')
     const countError = validateQuickButtons(settingsDraft.quickButtons.count, 'Pieza')
     if (weightError || countError) return showToast(weightError || countError)
-    const nextProducts = products.map((product) => product.quickButtonsCustom ? product : {
-      ...product,
-      quickButtons: isWeightUnit(product.unit) ? settingsDraft.quickButtons.weight : settingsDraft.quickButtons.count,
-    })
-    if (!persistAppData({ products: nextProducts, sales, settings: settingsDraft, cart, sequence, inventoryMovements })) {
-      return showToast('No se pudieron guardar los ajustes.')
+    try {
+      await updateBusinessSettings(user.uid, settingsDraft)
+      setSettings(settingsDraft)
+      showToast('Ajustes guardados.')
+    } catch (error) {
+      showToast(error.message || 'No se pudieron guardar los ajustes.')
     }
-    setProducts(nextProducts)
-    setSettings(settingsDraft)
-    showToast('Ajustes guardados.')
   }
 
   function updateQuickButton(group, index, key, value) {
@@ -676,13 +849,38 @@ export default function App() {
     ? calculateUnitSubtotalCents(liveQuantityBase, selectedProduct.unit, Number.isSafeInteger(livePriceCents) ? livePriceCents : -1)
     : 0
 
+  if (!cloudReady && cloudError) {
+    return <main className="auth-page"><section className="auth-card">
+      <h1>No se pudieron cargar tus datos</h1>
+      <p className="auth-message error" role="alert">{cloudError}</p>
+      <button className="secondary full" onClick={() => window.location.reload()}>Reintentar</button>
+      <button className="text-button" onClick={signOut}>Cerrar sesión</button>
+    </section></main>
+  }
+
+  if (!cloudReady) {
+    return <main className="auth-page"><section className="auth-card"><h1>ReciboApp</h1><p>Cargando tus datos…</p></section></main>
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
         <div><strong>{settings.businessName || 'ReciboApp'}</strong><span>Pesa, registra y cobra</span></div>
+        <button className="text-button" onClick={signOut}>Cerrar sesión</button>
       </header>
 
       <main className="content">
+        {(!online || cloudStatus.fromCache || cloudStatus.hasPendingWrites || pendingSales.length > 0) && (
+          <div className="notice" role="status">
+            {!online ? 'Sin conexión. ' : ''}
+            {cloudStatus.fromCache ? 'Mostrando datos guardados en este dispositivo. ' : ''}
+            {cloudStatus.hasPendingWrites ? 'Hay cambios pendientes de sincronización. ' : ''}
+            {pendingSales.length > 0 && `${pendingSales.length} venta(s) pendiente(s) de sincronizar. `}
+            {pendingSales.find((entry) => entry.error)?.error && <span>{pendingSales.find((entry) => entry.error).error} </span>}
+            {online && pendingSales.length > 0 && <button className="text-button" onClick={() => flushPendingSales().catch((error) => showToast(error.message))}>Reintentar sincronización</button>}
+          </div>
+        )}
+        {cloudError && <p className="auth-message error" role="alert">{cloudError}</p>}
         {tab === 'sale' && (
           <section className="module sale-module">
             <div className="sale-grid">
@@ -809,6 +1007,7 @@ export default function App() {
               ))}
               {salesForDate.length === 0 && <p className="empty-state">No hay ventas en esta fecha.</p>}
             </div>
+            {salesHasMore && <button className="secondary full" onClick={loadMoreSales}>Cargar ventas anteriores</button>}
           </section>
         )}
 
@@ -932,7 +1131,23 @@ export default function App() {
         </Modal>
       )}
 
+      {migrationDialog && (
+        <Modal title="Importar datos de este dispositivo" onClose={skipLocalMigration} footer={<>
+          <button type="button" className="secondary" onClick={skipLocalMigration}>Omitir por ahora</button>
+          <button type="button" className="primary" onClick={migrateLocalData} disabled={Boolean(migrationProgress)}>{migrationProgress || 'Migrar datos'}</button>
+        </>}>
+          <p>Encontramos productos, ventas o ajustes guardados localmente. Puedes importarlos a esta cuenta; la migración no borra el respaldo de este dispositivo.</p>
+          {migration && <p className="notice">Ya existe un proceso de migración registrado para esta cuenta.</p>}
+        </Modal>
+      )}
+
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>
   )
+}
+
+export default function App() {
+  const { user } = useAuth()
+  if (!user || !user.emailVerified) return <AuthScreen />
+  return <BusinessApp key={user.uid} />
 }

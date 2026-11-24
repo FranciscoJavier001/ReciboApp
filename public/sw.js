@@ -1,4 +1,4 @@
-const CACHE = 'reciboapp-v1.1.1'
+const CACHE = 'reciboapp-v1.2.2'
 const ASSETS = ['/', '/manifest.webmanifest', '/icon-192.svg', '/icon-512.svg']
 
 self.addEventListener('install', (event) => {

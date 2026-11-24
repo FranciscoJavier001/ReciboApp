@@ -1,0 +1,17 @@
+{
+  "database": [
+    {
+      "instance": "demo-realtime-prototype",
+      "rules": "database.rules.json"
+    }
+  ],
+  "emulators": {
+    "database": {
+      "port": 9002
+    },
+    "ui": {
+      "enabled": false
+    },
+    "singleProjectMode": true
+  }
+}

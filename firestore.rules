@@ -1,0 +1,262 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedInAs(uid) {
+      return request.auth != null
+        && request.auth.uid == uid
+        && request.auth.token.email_verified == true;
+    }
+
+    function userPath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function isResetting(uid) {
+      return exists(userPath(uid))
+        && get(userPath(uid)).data.get('resetInProgress', false) == true;
+    }
+
+    function isImporting(uid) {
+      let path = /databases/$(database)/documents/users/$(uid)/migrations/current;
+      return exists(path) && get(path).data.status == 'importing';
+    }
+
+    function validButtons(buttons) {
+      return buttons is list
+        && buttons.size() == 6
+        && buttons[0] is map && buttons[0].value is number && buttons[0].value > 0 && buttons[0].unit is string
+        && buttons[1] is map && buttons[1].value is number && buttons[1].value > 0 && buttons[1].unit is string
+        && buttons[2] is map && buttons[2].value is number && buttons[2].value > 0 && buttons[2].unit is string
+        && buttons[3] is map && buttons[3].value is number && buttons[3].value > 0 && buttons[3].unit is string
+        && buttons[4] is map && buttons[4].value is number && buttons[4].value > 0 && buttons[4].unit is string
+        && buttons[5] is map && buttons[5].value is number && buttons[5].value > 0 && buttons[5].unit is string;
+    }
+
+    function validProduct(data) {
+      return data.keys().hasAll([
+          'id', 'name', 'unit', 'unitLabel', 'defaultPriceCents', 'priceLevels',
+          'inventoryEnabled', 'inventoryUnit', 'stockGrams', 'minimumStockGrams',
+          'quickButtons', 'quickButtonsCustom', 'modifiedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'unit', 'unitLabel', 'customUnit', 'defaultPriceCents',
+          'priceLevels', 'inventoryEnabled', 'inventoryUnit', 'stockGrams',
+          'minimumStockGrams', 'quickButtons', 'quickButtonsCustom', 'createdAt',
+          'modifiedAt', 'lastMovementId'
+        ])
+        && data.id is string
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 200
+        && data.unit is string && data.unit.size() > 0 && data.unit.size() <= 32
+        && data.unitLabel is string && data.unitLabel.size() <= 48
+        && data.defaultPriceCents is int && data.defaultPriceCents >= 0
+        && data.priceLevels is map
+        && data.priceLevels.P1 is int && data.priceLevels.P1 >= 0
+        && (data.priceLevels.P2 == null || (data.priceLevels.P2 is int && data.priceLevels.P2 >= 0))
+        && (data.priceLevels.P3 == null || (data.priceLevels.P3 is int && data.priceLevels.P3 >= 0))
+        && data.inventoryEnabled is bool
+        && data.inventoryUnit is string
+        && data.stockGrams is int && data.stockGrams >= 0
+        && data.minimumStockGrams is int && data.minimumStockGrams >= 0
+        && data.priceLevels.keys().hasOnly(['P1', 'P2', 'P3'])
+        && validButtons(data.quickButtons)
+        && data.quickButtonsCustom is bool
+        && data.modifiedAt is string
+        && (!data.keys().hasAny(['createdAt']) || data.createdAt is string)
+        && (!data.keys().hasAny(['lastMovementId']) || data.lastMovementId is string)
+        && (!data.keys().hasAny(['customUnit']) || data.customUnit is string);
+    }
+
+    function counterPath(uid) {
+      return /databases/$(database)/documents/users/$(uid)/counters/sales;
+    }
+
+    function validMovement(data) {
+      return data.keys().hasAll([
+          'productId', 'productName', 'type', 'quantity', 'quantityBase',
+          'unit', 'stockBefore', 'stockAfter', 'stockBeforeBase',
+          'stockAfterBase', 'createdAt', 'reason', 'saleId'
+        ])
+        && data.keys().hasOnly([
+          'productId', 'productName', 'type', 'quantity', 'quantityBase',
+          'unit', 'stockBefore', 'stockAfter', 'stockBeforeBase',
+          'stockAfterBase', 'createdAt', 'reason', 'saleId'
+        ])
+        && data.productId is string
+        && data.productName is string
+        && data.type in ['stock-in', 'manual-out', 'shrinkage', 'return', 'adjustment', 'sale', 'sale-cancel']
+        && data.quantity is number && data.quantity > 0
+        && data.quantityBase is int && data.quantityBase > 0
+        && data.unit is string
+        && data.stockBefore is number && data.stockBefore >= 0
+        && data.stockAfter is number && data.stockAfter >= 0
+        && data.stockBeforeBase is int && data.stockBeforeBase >= 0
+        && data.stockAfterBase is int && data.stockAfterBase >= 0
+        && data.reason is string
+        && data.createdAt is string
+        && (!data.keys().hasAny(['saleId']) || data.saleId == null || data.saleId is string);
+    }
+
+    function validSale(data) {
+      return data.keys().hasAll([
+          'id', 'sequence', 'folio', 'createdAt', 'customerName',
+          'paymentMethod', 'receivedCents', 'changeCents', 'totalCents',
+          'status', 'items', 'inventoryItems', 'inventoryApplied'
+        ])
+        && data.keys().hasOnly([
+          'id', 'sequence', 'folio', 'createdAt', 'customerName',
+          'paymentMethod', 'receivedCents', 'changeCents', 'totalCents',
+          'status', 'items', 'inventoryItems', 'inventoryApplied', 'cancelledAt'
+        ])
+        && data.id is string && data.sequence is int && data.sequence >= 1
+        && data.folio is string && data.createdAt is string
+        && data.customerName is string && data.customerName.size() <= 200
+        && data.paymentMethod in ['efectivo', 'transferencia', 'otro']
+        && data.receivedCents is int && data.receivedCents >= 0
+        && data.changeCents is int && data.changeCents >= 0
+        && data.totalCents is int && data.totalCents >= 0
+        && data.status in ['completed', 'cancelled']
+        && data.items is list && data.items.size() > 0 && data.items.size() <= 200
+        && data.inventoryItems is list && data.inventoryItems.size() <= 200
+        && data.inventoryApplied is bool
+        && (!data.keys().hasAny(['cancelledAt']) || data.cancelledAt is string);
+    }
+
+    function validSettings(data) {
+      return data.keys().hasOnly([
+          'businessName', 'phone', 'thankYouMessage', 'theme', 'quickButtons'
+        ])
+        && data.businessName is string
+        && data.phone is string
+        && data.thankYouMessage is string
+        && data.theme in ['light', 'dark']
+        && data.quickButtons is map
+        && data.quickButtons.keys().hasOnly(['weight', 'count'])
+        && validButtons(data.quickButtons.weight)
+        && validButtons(data.quickButtons.count);
+    }
+
+    function validCart(data) {
+      return data.keys().hasOnly(['items', 'updatedAt', 'priceLevel', 'revision', 'modifiedAt'])
+        && data.items is list && data.items.size() <= 200
+        && (!data.keys().hasAny(['updatedAt']) || data.updatedAt is timestamp)
+        && (!data.keys().hasAny(['modifiedAt']) || data.modifiedAt is timestamp)
+        && (!data.keys().hasAny(['priceLevel']) || data.priceLevel in ['P1', 'P2', 'P3'])
+        && (!data.keys().hasAny(['revision']) || data.revision is string);
+    }
+
+    function validCounter(data) {
+      return data.keys().hasOnly(['value', 'lastOperationId'])
+        && data.value is int && data.value >= 0
+        && (!data.keys().hasAny(['lastOperationId']) || data.lastOperationId is string);
+    }
+
+    function validMigration(data) {
+      return data.keys().hasOnly([
+          'migrationId', 'status', 'expectedCounts', 'uploadedCounts',
+          'totalChunks', 'uploadedChunks', 'startedAt', 'completedAt'
+        ])
+        && data.migrationId is string
+        && data.status in ['importing', 'complete']
+        && data.expectedCounts is map
+        && data.uploadedCounts is map
+        && data.totalChunks is int && data.totalChunks >= 0
+        && data.uploadedChunks is int && data.uploadedChunks >= 0
+        && data.startedAt is string
+        && (!data.keys().hasAny(['completedAt']) || data.completedAt is string);
+    }
+
+    match /users/{uid} {
+      allow read: if signedInAs(uid);
+      allow create: if signedInAs(uid)
+        && request.resource.data.keys().hasOnly(['createdAt', 'resetInProgress'])
+        && (!request.resource.data.keys().hasAny(['createdAt']) || request.resource.data.createdAt is timestamp)
+        && (!request.resource.data.keys().hasAny(['resetInProgress']) || request.resource.data.resetInProgress in [false, true]);
+      allow update: if signedInAs(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['resetInProgress'])
+        && request.resource.data.resetInProgress == true;
+      allow delete: if signedInAs(uid) && isResetting(uid);
+
+      match /products/{productId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && validProduct(request.resource.data);
+        allow update: if signedInAs(uid) && validProduct(request.resource.data);
+        allow delete: if signedInAs(uid) && (isResetting(uid) || resource.data.stockGrams == 0);
+      }
+
+      match /sales/{saleId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && validSale(request.resource.data)
+          && (request.resource.data.status == 'completed' || isImporting(uid))
+          && request.resource.data.id == saleId
+          && (isImporting(uid)
+            || (getAfter(counterPath(uid)).data.value == request.resource.data.sequence
+              && getAfter(counterPath(uid)).data.lastOperationId == saleId));
+        allow update: if signedInAs(uid)
+          && resource.data.status == 'completed'
+          && request.resource.data.status == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'cancelledAt'])
+          && request.resource.data.cancelledAt is string;
+        allow delete: if signedInAs(uid) && isResetting(uid);
+      }
+
+      match /settings/{settingsId} {
+        allow read: if signedInAs(uid);
+        allow create, update: if signedInAs(uid) && validSettings(request.resource.data);
+        allow delete: if signedInAs(uid) && isResetting(uid);
+      }
+
+      match /carts/{cartId} {
+        allow read: if signedInAs(uid);
+        allow create, update: if signedInAs(uid) && validCart(request.resource.data);
+        allow delete: if signedInAs(uid);
+      }
+
+      match /counters/{counterId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && validCounter(request.resource.data)
+          && (isImporting(uid)
+            || (request.resource.data.value == 1
+              && request.resource.data.lastOperationId is string));
+        allow update: if signedInAs(uid) && validCounter(request.resource.data)
+          && (isImporting(uid)
+            || (request.resource.data.value == resource.data.value + 1
+              && request.resource.data.lastOperationId is string
+              && request.resource.data.lastOperationId != resource.data.get('lastOperationId', '')));
+        allow delete: if signedInAs(uid) && isResetting(uid);
+      }
+
+      match /inventoryMovements/{movementId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && validMovement(request.resource.data);
+        allow update: if false;
+        allow delete: if signedInAs(uid) && isResetting(uid);
+      }
+
+      match /migrations/{migrationId} {
+        allow read: if signedInAs(uid);
+        allow create, update: if signedInAs(uid)
+          && migrationId == 'current'
+          && validMigration(request.resource.data)
+          && (resource == null
+            || (request.resource.data.migrationId == resource.data.migrationId
+              && request.resource.data.expectedCounts == resource.data.expectedCounts
+              && request.resource.data.totalChunks == resource.data.totalChunks
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'uploadedChunks', 'uploadedCounts', 'status', 'completedAt'
+              ])
+              && request.resource.data.status in ['importing', 'complete']));
+        allow delete: if signedInAs(uid) && isResetting(uid);
+      }
+
+      match /migrationChunks/{chunkId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid) && isImporting(uid)
+          && request.resource.data.keys().hasOnly(['counts', 'completedAt'])
+          && request.resource.data.counts is map
+          && request.resource.data.completedAt is string;
+        allow update: if false;
+        allow delete: if signedInAs(uid) && isResetting(uid);
+      }
+    }
+  }
+}
