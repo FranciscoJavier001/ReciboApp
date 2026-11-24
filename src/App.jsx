@@ -98,11 +98,30 @@ function Icon({ name, size = 22 }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
 
-function Modal({ title, children, onClose, wide = false }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+function Modal({ title, children, onClose, footer, wide = false }) {
+  const backdropRef = useRef(null)
+
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+    const updateViewport = () => {
+      backdropRef.current?.style.setProperty('--modal-viewport-height', `${viewport.height}px`)
+      backdropRef.current?.style.setProperty('--modal-viewport-offset-top', `${viewport.offsetTop}px`)
+    }
+    updateViewport()
+    viewport.addEventListener('resize', updateViewport)
+    viewport.addEventListener('scroll', updateViewport)
+    return () => {
+      viewport.removeEventListener('resize', updateViewport)
+      viewport.removeEventListener('scroll', updateViewport)
+    }
+  }, [])
+
+  return <div ref={backdropRef} className="modal-backdrop" role="presentation" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
     <section className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
-      <div className="modal-head"><h2>{title}</h2><button className="icon-button" onClick={onClose}>×</button></div>
-      {children}
+      <div className="modal-head"><h2>{title}</h2><button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}>×</button></div>
+      <div className="modal-body">{children}</div>
+      <div className="modal-foot">{footer || <button type="button" className="secondary" onClick={onClose}>Cerrar</button>}</div>
     </section>
   </div>
 }
@@ -822,8 +841,8 @@ export default function App() {
       </nav>
 
       {productModal && (
-        <Modal title={productModal.id ? 'Editar producto' : 'Nuevo producto'} onClose={() => setProductModal(null)}>
-          <form className="form-stack" onSubmit={saveProduct}>
+        <Modal title={productModal.id ? 'Editar producto' : 'Nuevo producto'} onClose={() => setProductModal(null)} footer={<><button type="button" className="secondary" onClick={() => setProductModal(null)}>Cancelar</button><button type="submit" form="product-form" className="primary">{productModal.id ? 'Guardar cambios' : 'Crear producto'}</button></>}>
+          <form id="product-form" className="form-stack" onSubmit={saveProduct}>
             <label><span>Nombre del producto</span><input name="name" defaultValue={productModal.name || ''} required /></label>
             <label><span>Unidad de venta</span><select name="unit" value={productModal.unit || 'Kilogramo'} onChange={(e) => {
               const nextUnit = e.target.value
@@ -866,13 +885,12 @@ export default function App() {
                 return <div className="quick-setting-row" key={`product-quick-${index}`}><input name={`quick-${index}-value`} type="number" min="0.001" step="any" defaultValue={defaults?.value} aria-label={`Valor del incremento ${index + 1}`} />{isWeightUnit(productModal.unit || 'Kilogramo') && <select name={`quick-${index}-unit`} defaultValue={defaults?.unit || 'Gramo'} aria-label={`Unidad del incremento ${index + 1}`}>{['Gramo', 'Kilogramo', 'Tonelada'].map((unit) => <option key={unit}>{unit}</option>)}</select>}</div>
               })}
             </fieldset>
-            <button className="primary" type="submit">{productModal.id ? 'Guardar cambios' : 'Crear producto'}</button>
           </form>
         </Modal>
       )}
 
       {checkout && (
-        <Modal title="Cobrar venta" onClose={() => setCheckout(false)} wide>
+        <Modal title="Cobrar venta" onClose={() => setCheckout(false)} wide footer={<><button type="button" className="secondary" onClick={() => setCheckout(false)}>Cancelar</button><button type="button" className="primary" onClick={confirmSale} disabled={paymentMethod === 'efectivo' && (Number.isNaN(receivedCents) || receivedCents < cartTotal)}>Confirmar venta</button></>}>
           <div className="checkout">
             <div className="checkout-total"><span>Total</span><strong>{formatMXN(cartTotal)}</strong></div>
             <label><span>Nombre del cliente (opcional)</span><input value={customerName} onChange={(e) => setCustomerName(e.target.value)} /></label>
@@ -883,32 +901,33 @@ export default function App() {
                 <div className="change-row"><span>Cambio</span><strong>{formatMXN(Math.max(0, changeCents))}</strong></div>
               </>
             )}
-            <button className="primary full" onClick={confirmSale} disabled={paymentMethod === 'efectivo' && (Number.isNaN(receivedCents) || receivedCents < cartTotal)}>Confirmar venta</button>
           </div>
         </Modal>
       )}
 
       {ticketSale && (
-        <Modal title={`Ticket #${ticketSale.folio}`} onClose={() => setTicketSale(null)} wide>
+        <Modal title={`Ticket #${ticketSale.folio}`} onClose={() => setTicketSale(null)} wide footer={<div className="ticket-actions">
+          <button className="primary" onClick={() => shareTicket(ticketSale)}>Compartir</button>
+          <button className="secondary" onClick={() => downloadTicket(ticketSale)}>Guardar imagen</button>
+          <button className="secondary" onClick={() => copyTicket(ticketSale)}>Copiar texto</button>
+          <button className="text-button" onClick={() => setTicketSale(null)}>Nueva venta</button>
+        </div>}>
           <TicketCanvas sale={ticketSale} settings={settings} />
-          <div className="ticket-actions">
-            <button className="primary" onClick={() => shareTicket(ticketSale)}>Compartir</button>
-            <button className="secondary" onClick={() => downloadTicket(ticketSale)}>Guardar imagen</button>
-            <button className="secondary" onClick={() => copyTicket(ticketSale)}>Copiar texto</button>
-            <button className="text-button" onClick={() => setTicketSale(null)}>Nueva venta</button>
-          </div>
         </Modal>
       )}
 
       {selectedSale && (
-        <Modal title={`Venta #${selectedSale.folio}`} onClose={() => setSelectedSale(null)} wide>
+        <Modal title={`Venta #${selectedSale.folio}`} onClose={() => setSelectedSale(null)} wide footer={<div className="ticket-actions">
+          <button className="primary" onClick={() => setTicketSale(selectedSale)}>Ver ticket</button>
+          <button className="secondary" onClick={() => shareTicket(selectedSale)}>Compartir nuevamente</button>
+          {selectedSale.status !== 'cancelled' && <button className="danger" onClick={() => cancelSale(selectedSale)}>Cancelar venta</button>}
+        </div>}>
           <div className="sale-detail">
             <p>{new Date(selectedSale.createdAt).toLocaleString('es-MX')}</p>
             {selectedSale.customerName && <p>Cliente: {selectedSale.customerName}</p>}
             {selectedSale.items.map((item) => <div className="detail-row" key={item.id}><span>{item.name}<small>{formatQuantity(item.quantity, item.unit, item.unitLabel)} × {formatMXN(item.priceCents)}</small></span><b>{formatMXN(item.subtotalCents)}</b></div>)}
             <div className="detail-total"><span>Total</span><strong>{formatMXN(selectedSale.totalCents)}</strong></div>
             {selectedSale.status === 'cancelled' && <p className="cancelled-label">Venta cancelada</p>}
-            <div className="ticket-actions"><button className="primary" onClick={() => setTicketSale(selectedSale)}>Ver ticket</button><button className="secondary" onClick={() => shareTicket(selectedSale)}>Compartir nuevamente</button>{selectedSale.status !== 'cancelled' && <button className="danger" onClick={() => cancelSale(selectedSale)}>Cancelar venta</button>}</div>
           </div>
         </Modal>
       )}
