@@ -125,8 +125,8 @@ legend { width:100%; margin-bottom:7px; }
   .app-header { padding-left:24px; }
 }
 @media (max-width: 759px) {
-  .app-header { position:sticky; top:0; z-index:15; }
-  .content { padding:14px 12px calc(88px + env(safe-area-inset-bottom)); }
+  .app-header { position:sticky; top:0; z-index:15; height:calc(68px + env(safe-area-inset-top)); }
+  .content { padding:22px 12px calc(88px + env(safe-area-inset-bottom)); }
   .sale-grid { grid-template-columns:1fr; }
   .product-picker, .cart-panel { min-height:auto; }
   .product-picker { max-height:none; }
