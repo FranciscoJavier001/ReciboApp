@@ -143,7 +143,7 @@ function normalizeCart(cart, products) {
         unit,
         unitLabel: item.unitLabel || product?.unitLabel || unit,
         quantityBase: Number.isSafeInteger(quantityBase) ? quantityBase : 0,
-        priceLevel: item.priceLevel || 'P1',
+        priceLevel: ['P1', 'P2', 'P3'].includes(item.priceLevel) ? item.priceLevel : 'P1',
       }
     }),
   }

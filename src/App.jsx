@@ -79,14 +79,6 @@ function stockInputValue(product, unit) {
   return String((product?.stockGrams || 0) / scale)
 }
 
-function displayQuickButton(button, productUnit) {
-  if (isWeightUnit(productUnit)) {
-    const label = button.unit === 'Gramo' ? 'gr' : button.unit === 'Kilogramo' ? 'kg' : 'ton'
-    return `+${button.value} ${label}`
-  }
-  return `+${button.value}`
-}
-
 function Icon({ name, size = 22 }) {
   const paths = {
     sale: <><path d="M4 7h16l-1.5 10h-13z"/><path d="M8 11h8M8 14h5"/></>,
@@ -187,7 +179,7 @@ export default function App() {
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [quantity, setQuantity] = useState('')
   const [quantityHistory, setQuantityHistory] = useState([])
-  const [priceLevel, setPriceLevel] = useState(cart.priceLevel || 'P1')
+  const [priceLevel, setPriceLevel] = useState('P1')
   const [temporaryPrice, setTemporaryPrice] = useState('')
   const [inventoryQuery, setInventoryQuery] = useState('')
   const [inventoryFilter, setInventoryFilter] = useState('all')
@@ -236,12 +228,13 @@ export default function App() {
     setSelectedProduct(product)
     setQuantity(isWeightUnit(product.unit) ? '' : '1')
     setQuantityHistory([])
-    setPriceLevel(cart.priceLevel || 'P1')
-    setTemporaryPrice((priceForLevel(product, cart.priceLevel || 'P1').price / 100).toFixed(2))
+    setPriceLevel('P1')
+    setTemporaryPrice((priceForLevel(product, 'P1').price / 100).toFixed(2))
   }
 
   function addToCart() {
     if (!selectedProduct) return
+    if (!PRICE_LEVELS.includes(priceLevel)) return showToast('Selecciona el nivel de precio.')
     const error = validateUnitQuantity(quantity, selectedProduct.unit)
     if (error) return showToast(error)
     const priceCents = pesoInputToCents(temporaryPrice)
@@ -260,7 +253,7 @@ export default function App() {
       priceCents,
       subtotalCents: calculateUnitSubtotalCents(quantityBase, selectedProduct.unit, priceCents),
     }
-    const next = { ...cart, priceLevel, items: [...cart.items, item] }
+    const next = { ...cart, items: [...cart.items, item] }
     setCart(next)
     setSelectedProduct(null)
     setQuantity('')
@@ -299,8 +292,7 @@ export default function App() {
   function cancelCart() {
     if (!cart.items.length) return
     if (!window.confirm('¿Cancelar la cuenta actual?')) return
-    const next = { items: [], priceLevel: cart.priceLevel || 'P1' }
-    setCart(next)
+    setCart({ items: [] })
   }
 
   function addQuickQuantity(button) {
@@ -328,7 +320,6 @@ export default function App() {
 
   function changePriceLevel(level) {
     setPriceLevel(level)
-    setCart((current) => ({ ...current, priceLevel: level }))
     if (selectedProduct) {
       setTemporaryPrice((priceForLevel(selectedProduct, level).price / 100).toFixed(2))
     }
@@ -359,6 +350,9 @@ export default function App() {
 
   function confirmSale() {
     if (confirmingRef.current || cart.items.length === 0) return
+    if (cart.items.some((item) => !PRICE_LEVELS.includes(item.priceLevel))) {
+      return showToast('Cada artículo debe tener un nivel de precio.')
+    }
     if (paymentMethod === 'efectivo' && (Number.isNaN(receivedCents) || receivedCents < cartTotal)) {
       return showToast('El efectivo recibido es insuficiente.')
     }
@@ -384,7 +378,7 @@ export default function App() {
     sale.inventoryItems = inventoryResult.inventoryItems
     sale.inventoryApplied = inventoryResult.inventoryItems.length > 0
     const nextSales = [sale, ...sales]
-    const emptyCart = { items: [], priceLevel: cart.priceLevel || 'P1' }
+    const emptyCart = { items: [] }
     const nextState = {
       products: inventoryResult.products,
       sales: nextSales,
@@ -402,6 +396,8 @@ export default function App() {
     setSales(nextSales)
     setSequence(nextSequence)
     setCart(emptyCart)
+    setPriceLevel('P1')
+    setTemporaryPrice('')
     setCheckout(false)
     setCustomerName('')
     setReceived('')
@@ -605,6 +601,9 @@ export default function App() {
         setSettings(imported.settings)
         setSettingsDraft(imported.settings)
         setCart(imported.cart)
+        setPriceLevel('P1')
+        setSelectedProduct(null)
+        setTemporaryPrice('')
         setSequence(imported.sequence)
         setInventoryMovements(imported.inventoryMovements)
         showToast('Respaldo importado.')
@@ -625,6 +624,8 @@ export default function App() {
     setSettings({ ...DEFAULT_SETTINGS })
     setSettingsDraft({ ...DEFAULT_SETTINGS })
     setCart({ items: [] })
+    setPriceLevel('P1')
+    setTemporaryPrice('')
     setSequence(0)
     setInventoryMovements([])
     setTab('sale')
@@ -688,14 +689,13 @@ export default function App() {
             <div className="sale-grid">
               <div className="panel product-picker">
                 <h1>Nueva venta</h1>
-                <label className="price-level-field"><span>Nivel de precio</span><select value={priceLevel} onChange={(e) => changePriceLevel(e.target.value)}>{PRICE_LEVELS.map((level) => <option key={level}>{level}</option>)}</select></label>
                 <label className="search-field"><span>Buscar producto</span><input value={productQuery} onChange={(e) => setProductQuery(e.target.value)} placeholder="Nombre del producto" /></label>
                 {!selectedProduct ? (
                   <div className="product-results">
                     {filteredProducts.map((product) => (
                       <button className="product-result" key={product.id} onClick={() => selectProduct(product)}>
                         <span><strong>{product.name}</strong><small>{product.unitLabel || product.unit}</small></span>
-                        <b>{formatMXN(priceForLevel(product, priceLevel).price)}</b>
+                        <b>{formatMXN(priceForLevel(product, 'P1').price)}</b>
                       </button>
                     ))}
                     {filteredProducts.length === 0 && <p className="empty-state">{products.length ? 'Sin coincidencias.' : 'No hay productos. Créalos en el módulo Productos.'}</p>}
@@ -704,13 +704,19 @@ export default function App() {
                   <div className="capture-card">
                     <button className="back-link" onClick={() => setSelectedProduct(null)}>← Cambiar producto</button>
                     <h2>{selectedProduct.name}</h2>
+                    <label className="price-level-field">
+                      <span>Nivel de precio del artículo</span>
+                      <select required value={priceLevel} onChange={(e) => changePriceLevel(e.target.value)}>
+                        {PRICE_LEVELS.map((level) => <option key={level}>{level}</option>)}
+                      </select>
+                    </label>
                     {priceForLevel(selectedProduct, priceLevel).fallback && <p className="notice">Sin precio {priceLevel}; se aplica el precio P1.</p>}
                     <div className="capture-fields">
-                      <label><span>Cantidad ({unitLabel(selectedProduct.unit, selectedProduct.customUnit)})</span><input inputMode={isWeightUnit(selectedProduct.unit) ? 'decimal' : 'numeric'} value={quantity} onChange={(e) => { setQuantity(e.target.value); setQuantityHistory([]) }} placeholder={selectedProduct.unit === 'Kilogramo' ? '1.350' : '1'} /></label>
-                      <label><span>Precio unitario</span><input inputMode="decimal" value={temporaryPrice} onChange={(e) => setTemporaryPrice(e.target.value)} /></label>
+                      <label><span>Cantidad ({unitLabel(selectedProduct.unit, selectedProduct.customUnit)})</span><input inputMode={isWeightUnit(selectedProduct.unit) ? 'decimal' : 'numeric'} value={quantity} onFocus={(e) => e.currentTarget.select()} onChange={(e) => { setQuantity(e.target.value); setQuantityHistory([]) }} placeholder={selectedProduct.unit === 'Kilogramo' ? '1.5' : '1'} /></label>
+                      <label><span>Precio unitario</span><input inputMode="decimal" value={temporaryPrice} onFocus={(e) => e.currentTarget.select()} onChange={(e) => setTemporaryPrice(e.target.value)} /></label>
                     </div>
                     <div className="quick-quantity-actions">
-                      {(selectedProduct.quickButtons || defaultQuickButtons(selectedProduct.unit)).map((button, index) => <button className="secondary quick-quantity" key={`${button.value}-${button.unit}-${index}`} onClick={() => addQuickQuantity(button)}>{displayQuickButton(button, selectedProduct.unit)}</button>)}
+                      {(selectedProduct.quickButtons || defaultQuickButtons(selectedProduct.unit)).map((button, index) => <button className="secondary quick-quantity" key={`${button.value}-${button.unit}-${index}`} onClick={() => addQuickQuantity(button)}><strong>{button.value}</strong>{isWeightUnit(selectedProduct.unit) && <small>{inventoryUnitForSale(button.unit)}</small>}</button>)}
                       <button className="text-button" onClick={undoQuickQuantity} disabled={!quantityHistory.length}>Deshacer</button>
                       <button className="text-button" onClick={clearQuickQuantity} disabled={!quantity}>Limpiar</button>
                     </div>

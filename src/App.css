@@ -94,6 +94,8 @@ input:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rg
 .price-level-field select { min-height:42px; }
 .quick-quantity-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:14px; }
 .quick-quantity { min-height:42px; padding:8px; }
+.quick-quantity strong { font-weight:800; }
+.quick-quantity small { margin-inline-start:4px; font-weight:400; }
 .quick-quantity-actions .text-button { min-height:40px; }
 .text-button:disabled { opacity:.45; cursor:not-allowed; }
 .notice { border-left:3px solid var(--green); background:var(--surface-2); color:var(--muted); padding:10px 12px; border-radius:4px 10px 10px 4px; }
